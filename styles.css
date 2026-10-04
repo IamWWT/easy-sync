@@ -1405,6 +1405,55 @@ body.is-mobile .easy-sync-auth-pending-actions button {
   flex-shrink: 0;
 }
 
+/* Vault join repository list (carrier 20261003-2128 R1): compact rows, one
+   repository name each; the whole row copies the name on click. */
+.easy-sync-vault-join-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 18em;
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+}
+
+.easy-sync-vault-join-repo-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--size-4-2);
+  width: 100%;
+  height: auto;
+  min-height: 44px;
+  padding: var(--size-4-2) var(--size-4-3);
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.easy-sync-vault-join-repo-row + .easy-sync-vault-join-repo-row {
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.easy-sync-vault-join-repo-row:hover {
+  background-color: var(--background-modifier-hover);
+}
+
+.easy-sync-vault-join-repo-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.easy-sync-vault-join-repo-copy {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
 /* Device code waiting modal */
 .easy-sync-device-code {
   font-family: var(--font-monospace);

@@ -3054,6 +3054,106 @@ describe("OneDriveClient.detectRemotelySaveRepository", () => {
   });
 });
 
+describe("OneDriveClient.detectExistingEasySyncRepositories", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function httpError(status: number, label: string): Error {
+    return Object.assign(new Error(`HTTP ${status} ${label}`), { status });
+  }
+
+  function storageNameOf(name: string): string {
+    try {
+      const decoded = decodeURIComponent(name);
+      if (decoded !== name && encodeURIComponent(decoded) === name) return name;
+    } catch {
+      // Not percent-encoded.
+    }
+    return encodeURIComponent(name);
+  }
+
+  function mockVaults(
+    vaults: Array<{ name: string; slots: string[] | null }>,
+  ): void {
+    vi.spyOn(obsidian, "requestUrl").mockImplementation(async (input) => {
+      const options = input as { url: string; method?: string };
+      const url = options.url;
+      if (url.includes("/me/drive/special/approot:/vaults:/children")) {
+        return {
+          status: 200,
+          headers: {},
+          json: {
+            value: vaults.map((vault) => ({
+              id: `dir-${vault.name}`,
+              name: vault.name,
+              folder: {},
+            })),
+          },
+        };
+      }
+      const match = /vaults\/([^/]+)\/\.easy-sync:\/children/.exec(url);
+      if (match) {
+        const storage = match[1];
+        const target = vaults.find(
+          (vault) => storageNameOf(vault.name) === storage,
+        );
+        if (!target) throw new Error(`unexpected request: ${url}`);
+        if (target.slots === null) {
+          // No .easy-sync directory at all — a plain 404, same as the cloud.
+          throw httpError(404, "Not Found");
+        }
+        return {
+          status: 200,
+          headers: {},
+          json: {
+            value: target.slots.map((slot) => ({
+              id: `${target.name}-${slot}`,
+              name: slot,
+            })),
+          },
+        };
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+  }
+
+  it("returns an empty list when the vaults directory does not exist", async () => {
+    vi.spyOn(obsidian, "requestUrl").mockImplementation(async () => {
+      throw httpError(404, "Not Found");
+    });
+    const client = new OneDriveClient(async () => "token");
+    await expect(client.detectExistingEasySyncRepositories()).resolves.toEqual([]);
+  });
+
+  it("keeps only directories that carry a protocol slot, across probe batches", async () => {
+    mockVaults([
+      { name: "活跃库", slots: ["protocol-v3.json"] },
+      { name: "死链库", slots: ["protocol-v2.json"] },
+      { name: "无控制目录", slots: null },
+      { name: "只有普通文件", slots: ["some-file.json"] },
+      { name: "第二批活跃库", slots: ["protocol-v3.json"] },
+    ]);
+    const client = new OneDriveClient(async () => "token");
+    await expect(client.detectExistingEasySyncRepositories())
+      .resolves.toEqual(["活跃库", "死链库", "第二批活跃库"]);
+  });
+
+  it("decodes legacy percent-encoded directory names and probes them verbatim", async () => {
+    const legacyName = encodeURIComponent("我的笔记");
+    mockVaults([{ name: legacyName, slots: ["protocol-v3.json"] }]);
+    const client = new OneDriveClient(async () => "token");
+    await expect(client.detectExistingEasySyncRepositories())
+      .resolves.toEqual(["我的笔记"]);
+  });
+
+  it("propagates listing failures instead of reporting an empty cloud", async () => {
+    vi.spyOn(obsidian, "requestUrl").mockImplementation(async () => {
+      throw httpError(400, "Bad Request");
+    });
+    const client = new OneDriveClient(async () => "token");
+    await expect(client.detectExistingEasySyncRepositories()).rejects.toBeTruthy();
+  });
+});
+
 describe("classifyRemotelySaveVaultChildren", () => {
   const file = (name: string): DriveItem => ({ id: name, name });
   const folder = (name: string): DriveItem => ({ id: name, name, folder: {} });

@@ -867,6 +867,18 @@ export interface LocaleStrings {
   "rsMigration.guideTitle": string;
   "rsMigration.guideBody": string;
   "rsMigration.guideOk": string;
+  "vaultJoin.offerTitle": string;
+  "vaultJoin.offerBody": string;
+  "vaultJoin.offerJoinTitle": string;
+  "vaultJoin.offerJoinDesc": string;
+  "vaultJoin.offerFreshTitle": string;
+  "vaultJoin.offerFreshDesc": string;
+  "vaultJoin.listTitle": string;
+  "vaultJoin.listGuide": string;
+  "vaultJoin.listEmpty": string;
+  "vaultJoin.nameCopied": string;
+  "vaultJoin.copyUnavailable": string;
+  "vaultJoin.detectNotice": string;
   "syncPlan.activationDecisionSummary": string;
   "syncPlan.confirmMigration": string;
   "syncPlan.migrationConfirmTitle": string;

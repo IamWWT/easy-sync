@@ -2160,6 +2160,98 @@ export class OneDriveClient {
     };
   }
 
+  /** List cloud repositories that already carry an EasySync sync line (the
+   *  protocol control directory is present). Read-only: one listing of vaults/
+   *  plus one path probe per candidate, four probes in flight at a time. An
+   *  empty list means the cloud holds no EasySync line; a thrown error means
+   *  detection failed and must not be read as absence. Legacy percent-encoded
+   *  directory names are probed verbatim and decoded for display. */
+  async detectExistingEasySyncRepositories(): Promise<string[]> {
+    const candidates: DriveItem[] = [];
+    let url: string | null =
+      "/me/drive/special/approot:/vaults:/children?$top=200&$select=id,name,folder";
+    let pages = 0;
+    while (url) {
+      if (pages >= EASYSYNC_VAULTS_MAX_PAGES) {
+        throw new Error("EasySync repository detection exceeded its page budget");
+      }
+      let response;
+      try {
+        response = await this.request("GET", url);
+      } catch (error) {
+        if (
+          error instanceof OneDriveError
+          && error.type === OneDriveErrorType.NotFound
+        ) {
+          // No vaults/ directory at all — confirmed absence, not a failure.
+          return [];
+        }
+        throw error;
+      }
+      const data = response.json as {
+        value?: DriveItem[];
+        "@odata.nextLink"?: unknown;
+      };
+      for (const item of data.value ?? []) {
+        if (item.folder && item.name) candidates.push(item);
+      }
+      const nextLink = data["@odata.nextLink"];
+      if (nextLink === undefined) {
+        url = null;
+      } else if (typeof nextLink === "string" && nextLink.length > 0) {
+        url = nextLink;
+      } else {
+        throw new Error("EasySync repository listing continuation is invalid");
+      }
+      pages++;
+    }
+
+    const repositories: string[] = [];
+    for (
+      let index = 0;
+      index < candidates.length;
+      index += EASYSYNC_VAULTS_PROBE_CONCURRENCY
+    ) {
+      const batch = candidates.slice(
+        index,
+        index + EASYSYNC_VAULTS_PROBE_CONCURRENCY,
+      );
+      const probed = await Promise.all(
+        batch.map(async (candidate): Promise<string | null> => {
+          const naming = resolveVaultDirectoryNaming(candidate.name);
+          let children: DriveItem[];
+          try {
+            const response = await this.request(
+              "GET",
+              `/me/drive/special/approot:/vaults/${naming.storage}/.easy-sync:/children?$select=id,name`,
+            );
+            children = (response.json as { value?: DriveItem[] }).value ?? [];
+          } catch (error) {
+            if (
+              error instanceof OneDriveError
+              && error.type === OneDriveErrorType.NotFound
+            ) {
+              // No control directory — not a repository.
+              return null;
+            }
+            throw error;
+          }
+          return children.some(
+            (item) =>
+              item.name === "protocol-v2.json"
+              || item.name === "protocol-v3.json",
+          )
+            ? naming.display
+            : null;
+        }),
+      );
+      for (const name of probed) {
+        if (name !== null) repositories.push(name);
+      }
+    }
+    return repositories;
+  }
+
   /** Copy one driveItem subtree into a same-drive destination folder.
    *  Graph copy is asynchronous and its monitor URL lives on a SharePoint
    *  host that must not receive the Graph token, so completion is observed by
@@ -3874,9 +3966,34 @@ const REMOTELY_SAVE_APPS_CONTAINER_NAMES = new Set(["apps", "应用", "applicati
 const REMOTELY_SAVE_DIR_NAME = "remotely-save";
 const REMOTELY_SAVE_METADATA_BASE_NAME = "_remotely-save-metadata-on-remote";
 const REMOTELY_SAVE_MAX_ROOT_PAGES = 25;
+/** Page budget for listing vaults/ during EasySync repository join detection.
+ *  Real clouds hold a handful of repositories; an over-budget listing is a
+ *  detection failure, never absence. */
+const EASYSYNC_VAULTS_MAX_PAGES = 5;
+/** Path probes in flight at a time during EasySync repository detection. */
+const EASYSYNC_VAULTS_PROBE_CONCURRENCY = 4;
 /** Filename shapes produced by rclone-crypt-style name encryption (research
  *  doc §124): a long unrecognisable token with no extension. */
 const REMOTELY_SAVE_CIPHER_NAME_PATTERN = /^[A-Za-z0-9_-]{16,}$/;
+
+/** Resolve a listed vault directory name into its request-path form and its
+ *  display form. Legacy storage directories are percent-encoded on the wire
+ *  and must be probed verbatim; canonical names are encoded for the request
+ *  path and displayed as-is. */
+function resolveVaultDirectoryNaming(name: string): {
+  storage: string;
+  display: string;
+} {
+  try {
+    const decoded = decodeURIComponent(name);
+    if (decoded !== name && encodeURIComponent(decoded) === name) {
+      return { storage: name, display: decoded };
+    }
+  } catch {
+    // Not a percent-encoded name; treat it as canonical.
+  }
+  return { storage: encodeURIComponent(name), display: name };
+}
 
 /** Decide whether a Remotely Save vault directory holds plaintext content or
  *  end-to-end encrypted ciphertext. Encrypted remotes encrypt every file

@@ -107,6 +107,8 @@ import {
 import { ConfirmModal, SyncPlanAlertModal } from "./ui/confirm-modal";
 import { RsMigrationOfferModal } from "./ui/rs-migration-offer-modal";
 import { RsMigrationFailureModal } from "./ui/rs-migration-failure-modal";
+import { VaultJoinOfferModal } from "./ui/vault-join-offer-modal";
+import { VaultJoinRepositoryListModal } from "./ui/vault-join-repository-list-modal";
 import { runRsMigrationTransaction } from "./sync/rs-migration-transaction";
 import { ScopeCrossingPromptModal } from "./ui/scope-crossing-prompt-modal";
 import type {
@@ -1095,7 +1097,7 @@ export default class EasySyncPlugin extends Plugin {
             : String(error),
         );
       });
-      void this.offerRsMigrationNoticeAfterFreshLogin();
+      void this.offerPostLoginRepositoryNotices();
     };
     // Loaded in the background after UI registration so Ribbon state is accurate.
 
@@ -2940,8 +2942,51 @@ export default class EasySyncPlugin extends Plugin {
 
   /** One-shot login-time hint (carrier plan §11.1 幕1): a fresh login that
    *  has never synced may be told a Remotely Save repository exists. Silent
-   *  and side-effect free — detection errors never surface here. */
-  private async offerRsMigrationNoticeAfterFreshLogin(): Promise<void> {
+   *  and side-effect free — detection errors never surface here. Returns
+   *  whether the notice was shown, so the EasySync join notice can yield the
+   *  one-shot slot to the migration line (carrier 20261003-2128 §五.3). */
+  private async offerRsMigrationNoticeAfterFreshLogin(): Promise<boolean> {
+    try {
+      if (!this.onedrive || !this.state) return false;
+      if (
+        this.rsAdoptionMarker
+        || this.hasCompletedSyncState()
+        || this.state.planReviewActive
+      ) return false;
+      const detected = await this.onedrive.detectRemotelySaveRepository(
+        this.app.vault.getName(),
+      );
+      if (!detected) return false;
+      this.noticeCenter?.show({
+        key: "rs-migration-detect",
+        message: this.i18n.t("rsMigration.detectNotice"),
+        priority: NOTICE_PRIORITY.info,
+      });
+      return true;
+    } catch (error) {
+      this.diag.warn(
+        "state",
+        "Remotely Save detection after login failed",
+        error instanceof Error ? error.message : String(error),
+      );
+      return false;
+    }
+  }
+
+  /** Login-time repository notices, migration first: when a paired Remotely
+   *  Save repository exists its notice wins the one-shot slot; otherwise the
+   *  EasySync join notice may appear. */
+  private async offerPostLoginRepositoryNotices(): Promise<void> {
+    const rsNoticeShown = await this.offerRsMigrationNoticeAfterFreshLogin();
+    if (!rsNoticeShown) await this.offerVaultJoinNoticeAfterFreshLogin();
+  }
+
+  /** One-shot login-time hint for the EasySync join offer: a fresh login
+   *  that has never synced may be told the cloud already holds EasySync
+   *  repositories under other names, so the first sync can join one. Silent
+   *  and side-effect free — detection errors never surface here (the offer
+   *  itself is a gain, not a safety gate). */
+  private async offerVaultJoinNoticeAfterFreshLogin(): Promise<void> {
     try {
       if (!this.onedrive || !this.state) return;
       if (
@@ -2949,19 +2994,22 @@ export default class EasySyncPlugin extends Plugin {
         || this.hasCompletedSyncState()
         || this.state.planReviewActive
       ) return;
-      const detected = await this.onedrive.detectRemotelySaveRepository(
-        this.app.vault.getName(),
-      );
-      if (!detected) return;
+      const vaultName = this.app.vault.getName();
+      const repositories = await this.onedrive
+        .detectExistingEasySyncRepositories();
+      if (repositories.length === 0) return;
+      if (repositories.some((name) => name === vaultName)) return;
       this.noticeCenter?.show({
-        key: "rs-migration-detect",
-        message: this.i18n.t("rsMigration.detectNotice"),
+        key: "vault-join-detect",
+        message: this.i18n.t("vaultJoin.detectNotice", {
+          count: repositories.length,
+        }),
         priority: NOTICE_PRIORITY.info,
       });
     } catch (error) {
       this.diag.warn(
         "state",
-        "Remotely Save detection after login failed",
+        "EasySync repository detection after login failed",
         error instanceof Error ? error.message : String(error),
       );
     }
@@ -3071,6 +3119,69 @@ export default class EasySyncPlugin extends Plugin {
     }
   }
 
+  /** EasySync repository join offer (carrier 20261003-2128 §五.3, R1). Runs at
+   *  first-sync triggers when this vault has never synced: a read-only cloud
+   *  scan looks for EasySync repositories; when every one of them differs
+   *  from this vault's name (byte-for-byte — case-only differences included)
+   *  the offer names the count, and "join" opens the repository-name list
+   *  (pre-loaded from the same scan); closing the list returns to the offer.
+   *  Detection is a gain, not a safety gate: failures log and fall through to
+   *  the plain first sync. "abort" ends this round with the choice preserved
+   *  (the next first-sync trigger re-detects, no extra state involved). */
+  private async maybeOfferExistingVaultJoin(): Promise<"continue" | "abort"> {
+    if (!this.onedrive || !this.syncExecutor || !this.state) return "continue";
+    if (
+      this.hasCompletedSyncState()
+      || this.state.planReviewActive
+      || !this.auth?.authState.isLoggedIn
+    ) return "continue";
+    const vaultName = this.app.vault.getName();
+    let repositories: string[];
+    try {
+      repositories = await this.onedrive.detectExistingEasySyncRepositories();
+    } catch (error) {
+      this.diag.warn(
+        "state",
+        "EasySync repository detection failed; the plain first sync proceeds",
+        error instanceof Error ? error.message : String(error),
+      );
+      return "continue";
+    }
+    if (repositories.length === 0) return "continue";
+    if (repositories.some((name) => name === vaultName)) return "continue";
+    this.diag.log(
+      "state",
+      "EasySync join offer shown for a never-synced vault",
+      { repositories: repositories.length, mutations: 0 },
+    );
+    for (;;) {
+      const offer = await new VaultJoinOfferModal(this.app, {
+        title: this.i18n.t("vaultJoin.offerTitle"),
+        body: this.i18n.t("vaultJoin.offerBody", {
+          count: repositories.length,
+        }),
+        join: {
+          title: this.i18n.t("vaultJoin.offerJoinTitle"),
+          description: this.i18n.t("vaultJoin.offerJoinDesc"),
+        },
+        fresh: {
+          title: this.i18n.t("vaultJoin.offerFreshTitle"),
+          description: this.i18n.t("vaultJoin.offerFreshDesc"),
+        },
+      }).awaitAction();
+      if (offer.action === "fresh-sync") return "continue";
+      if (offer.action === "dismiss") return "abort";
+      await new VaultJoinRepositoryListModal(this.app, {
+        title: this.i18n.t("vaultJoin.listTitle"),
+        guide: this.i18n.t("vaultJoin.listGuide"),
+        empty: this.i18n.t("vaultJoin.listEmpty"),
+        rows: repositories,
+        copiedNotice: this.i18n.t("vaultJoin.nameCopied"),
+        copyUnavailableNotice: this.i18n.t("vaultJoin.copyUnavailable"),
+      }, this.noticeCenter).awaitAction();
+    }
+  }
+
   /** Start a first sync (manual trigger from settings) */
   async startFirstSync(options: SyncRunOptions = {}): Promise<void> {
     if (!this.syncExecutor) return;
@@ -3094,6 +3205,10 @@ export default class EasySyncPlugin extends Plugin {
     }
     const rsMigration = await this.maybeRunRsMigrationOffer();
     if (rsMigration === "abort") return;
+    if (rsMigration !== "migrated") {
+      const vaultJoin = await this.maybeOfferExistingVaultJoin();
+      if (vaultJoin === "abort") return;
+    }
     await this.activateSyncView();
     await this.dispatchSyncRun({
       mode: "first",
@@ -5605,6 +5720,10 @@ export default class EasySyncPlugin extends Plugin {
         // which is the only state in which timers run.
         const rsMigration = await this.maybeRunRsMigrationOffer();
         if (rsMigration === "abort") return true;
+        if (rsMigration !== "migrated") {
+          const vaultJoin = await this.maybeOfferExistingVaultJoin();
+          if (vaultJoin === "abort") return true;
+        }
         this.diag.log("execute", `auto sync started — trigger=${trigger}`);
         dispatched = true;
         await this.dispatchSyncRun({
