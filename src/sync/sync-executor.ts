@@ -191,6 +191,7 @@ import {
   buildCanonicalPlanCandidateFromStateV2,
   buildCanonicalPlanCandidateV2,
   canonicalPlanDigestV2,
+  describeCanonicalPlanItemFactsDriftV2,
   finalizeCanonicalPlanCandidateV2,
   finalizeUnanchoredFolderEvidenceV2,
   folderPathDepth,
@@ -201,6 +202,7 @@ import {
   sealCanonicalPlanV2,
   summarizeCanonicalPlanReviewV2,
   type CanonicalPlanCandidateV2,
+  type CanonicalPlanItemFactsDriftV2,
   type FinalizedCanonicalPlanV2,
 } from "./canonical-plan-v2";
 import {
@@ -512,11 +514,13 @@ export function classifyRetryableObservationResult(
  * commit gate's normalization (describeStateV2MigrationCandidateDriftV1), so
  * field reports can distinguish "verification still converging" (anchor
  * counts growing, remote index stable) from observation or local-scan drift.
+ * `itemFacts` adds the item-level layer: which file changed which fact.
  */
 function describeStateV2MigrationReviewDriftFacts(
   nextCandidate: SyncStateEnvelopeV2,
   previousHold: MigrationHoldV2 | null,
   nextPlanIdentity: CanonicalPlanIdentityV2,
+  nextPlanItems: readonly SyncPlanItem[],
 ): {
   previousHold: {
     phase: string;
@@ -537,6 +541,7 @@ function describeStateV2MigrationReviewDriftFacts(
     sameFolderAnchors: boolean;
   } | null;
   planIdentityUnchanged: boolean | null;
+  itemFacts: CanonicalPlanItemFactsDriftV2 | null;
 } {
   const sectionCounts = (envelope: SyncStateEnvelopeV2) => ({
     remoteItems: Object.keys(envelope.remoteIndex.itemsById).length,
@@ -565,6 +570,13 @@ function describeStateV2MigrationReviewDriftFacts(
           nextPlanIdentity,
           previousHold.canonicalIdentity,
         )
+      : null,
+    itemFacts: previousHold
+      ? describeCanonicalPlanItemFactsDriftV2({
+          previousDigest: previousHold.canonicalIdentity.digest,
+          nextItems: nextPlanItems,
+          nextDigest: nextPlanIdentity.digest,
+        })
       : null,
   };
 }
@@ -11854,6 +11866,7 @@ export class SyncExecutor {
             migrationCandidateEnvelope,
             previousHold,
             plan.canonicalIdentity,
+            plan.items,
           ),
         },
       );
@@ -12058,7 +12071,7 @@ export class SyncExecutor {
         authorityCommit.migrationAuthorityCommittedThisRun;
       migrationExecutionHold = authorityCommit.migrationExecutionHold;
     } else {
-      await this.state.stageV2MigrationHold({
+      const hold = await this.state.stageV2MigrationHold({
         candidate: migrationCandidateEnvelope,
         source: public113MigrationInput!,
         reviewKind,
@@ -12069,12 +12082,14 @@ export class SyncExecutor {
         "V2 migration review changed before authority commit",
         {
           phase: "activation",
+          holdRevision: hold.revision,
           planItems: plan.items.length,
           mutations: 0,
           ...describeStateV2MigrationReviewDriftFacts(
             migrationCandidateEnvelope,
             existingConfirmed,
             canonicalIdentity,
+            plan.items,
           ),
         },
       );

@@ -2205,6 +2205,394 @@ function canonicalPlanItemFactsV2(item: SyncPlanItem): unknown[] {
   ];
 }
 
+/** Field names for canonicalPlanItemFactsV2 positions, in the same order. */
+const CANONICAL_PLAN_ITEM_FACT_NAMES_V2 = [
+  "type",
+  "path",
+  "reason",
+  "local",
+  "remote",
+  "folder",
+  "baseEtag",
+  "renameFrom",
+  "targetParentRemoteId",
+  "requiresConfirmation",
+  "reviewImpactCount",
+  "decisionToken",
+  "contentComparison",
+] as const;
+
+/** Nested fact names per top-level position of canonicalPlanItemFactsV2. */
+const CANONICAL_PLAN_ITEM_FACT_NESTED_NAMES_V2: Readonly<
+  Record<number, readonly string[]>
+> = {
+  3: ["local.path", "local.hash", "local.size", "local.binary"],
+  4: [
+    "remote.path",
+    "remote.driveId",
+    "remote.parentId",
+    "remote.size",
+    "remote.eTag",
+    "remote.cTag",
+    "remote.sha256Hash",
+    "remote.quickXorHash",
+  ],
+  5: [
+    "folder.remoteId",
+    "folder.parentRemoteId",
+    "folder.parentPath",
+    "folder.remoteETag",
+    "folder.parentRemoteETag",
+    "folder.sourceParentRemoteId",
+  ],
+  11: [
+    "decisionToken.version",
+    "decisionToken.vaultName",
+    "decisionToken.accountId",
+    "decisionToken.scope.accountId",
+    "decisionToken.scope.driveId",
+    "decisionToken.scope.vaultFolderId",
+    "decisionToken.scope.filesRootId",
+    "decisionToken.local",
+    "decisionToken.remote",
+    "decisionToken.ancestorHash",
+  ],
+  12: [
+    "contentComparison.version",
+    "contentComparison.result",
+    "contentComparison.localHash",
+    "contentComparison.localSize",
+    "contentComparison.remoteDriveId",
+    "contentComparison.remoteETag",
+    "contentComparison.remoteSize",
+    "contentComparison.remoteHash",
+  ],
+};
+
+/**
+ * Fact names the published review projection can show a user (see
+ * migration-hold-v2 projectReviewItems). Drift outside this set is invisible
+ * in the review the user is asked to confirm.
+ */
+const CANONICAL_REVIEW_VISIBLE_FACT_NAMES_V2 = new Set<string>([
+  "type",
+  "path",
+  "reason",
+  "local.hash",
+  "remote.eTag",
+  "folder.remoteId",
+  "folder.remoteETag",
+  "folder.parentRemoteId",
+  "folder.parentPath",
+  "folder.parentRemoteETag",
+]);
+
+const CANONICAL_PLAN_ITEM_FACTS_DRIFT_SAMPLE_LIMIT_V2 = 10;
+
+export type CanonicalPlanItemFactsDriftReasonV2 =
+  | "unparsable"
+  | "shape-mismatch"
+  | "sealed-plan-not-reproducible";
+
+export interface CanonicalPlanItemFactsDriftSampleV2 {
+  kind: "changed" | "added" | "removed";
+  type: string;
+  path: string;
+  /** Changed fact names; empty for a structurally added or removed item. */
+  fields: string[];
+}
+
+export interface CanonicalPlanItemFactsDriftV2 {
+  available: boolean;
+  reason: CanonicalPlanItemFactsDriftReasonV2 | null;
+  /** Sealed item counts per side; null when a digest could not be read. */
+  items: { previous: number; next: number } | null;
+  lastTotalFiles: { previous: number; next: number } | null;
+  changed: number;
+  added: number;
+  removed: number;
+  samples: CanonicalPlanItemFactsDriftSampleV2[];
+  samplesOmitted: number;
+  /** True only with at least one change, all of it outside the fields the
+   *  published review projection carries. */
+  outsideReviewFields: boolean;
+}
+
+interface CanonicalPlanDigestFactsV2 {
+  scope: SyncScope;
+  sourceCommitSeq: number;
+  lastTotalFiles: number;
+  items: CanonicalPlanItemFactsV2[];
+}
+
+/** One sealed item's ordered facts; positions align with the name table. */
+type CanonicalPlanItemFactsV2 = unknown[];
+
+/**
+ * Diagnostic item-fact drift between the sealed plan of a previous review hold
+ * and the freshly sealed plan of this round.
+ *
+ * The previous side is read back from `canonicalIdentity.digest`, which is the
+ * exact JSON serialization of the sealed item facts (never a hash), so the
+ * knife needs no new persisted state. The report is bounded and leak-free:
+ * paths and field names only, never field values. Names align position by
+ * position with canonicalPlanItemFactsV2; the guard test in
+ * tests/canonical-plan-v2.test.ts turns red when that layout moves.
+ *
+ * This never throws: a caller logging a review drift must not turn a
+ * diagnostic into a new failure. `available: false` carries the reason.
+ */
+export function describeCanonicalPlanItemFactsDriftV2(input: {
+  previousDigest: string;
+  nextItems: readonly SyncPlanItem[];
+  nextDigest: string;
+  limit?: number;
+}): CanonicalPlanItemFactsDriftV2 {
+  try {
+    const previous = readCanonicalPlanDigestFactsV2(input.previousDigest);
+    if (typeof previous === "string") {
+      return unavailableCanonicalPlanItemFactsDriftV2(previous);
+    }
+    const next = readCanonicalPlanDigestFactsV2(input.nextDigest);
+    if (typeof next === "string") {
+      return unavailableCanonicalPlanItemFactsDriftV2(next);
+    }
+    // The sealed plan of this round must be reproducible from the items the
+    // caller handed in; otherwise the pairing below would attribute drift to
+    // facts that never belonged to the sealed digest.
+    const reproduced = canonicalPlanDigestV2({
+      items: input.nextItems,
+      lastTotalFiles: next.lastTotalFiles,
+      scope: next.scope,
+      sourceCommitSeq: next.sourceCommitSeq,
+    });
+    if (reproduced !== input.nextDigest) {
+      return unavailableCanonicalPlanItemFactsDriftV2(
+        "sealed-plan-not-reproducible",
+      );
+    }
+    return diffCanonicalPlanItemFactsV2({
+      previous: previous.items,
+      next: input.nextItems.map(canonicalPlanItemFactsV2),
+      previousLastTotalFiles: previous.lastTotalFiles,
+      nextLastTotalFiles: next.lastTotalFiles,
+      limit: input.limit ?? CANONICAL_PLAN_ITEM_FACTS_DRIFT_SAMPLE_LIMIT_V2,
+    });
+  } catch {
+    // Observing a review drift must never add a failure of its own.
+    return unavailableCanonicalPlanItemFactsDriftV2("unparsable");
+  }
+}
+
+function unavailableCanonicalPlanItemFactsDriftV2(
+  reason: CanonicalPlanItemFactsDriftReasonV2,
+): CanonicalPlanItemFactsDriftV2 {
+  return {
+    available: false,
+    reason,
+    items: null,
+    lastTotalFiles: null,
+    changed: 0,
+    added: 0,
+    removed: 0,
+    samples: [],
+    samplesOmitted: 0,
+    outsideReviewFields: false,
+  };
+}
+
+function readCanonicalPlanDigestFactsV2(
+  digest: string,
+): CanonicalPlanDigestFactsV2 | CanonicalPlanItemFactsDriftReasonV2 {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(digest);
+  } catch {
+    return "unparsable";
+  }
+  if (
+    typeof parsed !== "object"
+    || parsed === null
+    || Array.isArray(parsed)
+    || (parsed as { version?: unknown }).version !== 2
+  ) {
+    return "shape-mismatch";
+  }
+  const record = parsed as Record<string, unknown>;
+  const scope = readCanonicalPlanDigestScopeV2(record.scope);
+  if (
+    !scope
+    || !Number.isSafeInteger(record.sourceCommitSeq)
+    || !Number.isSafeInteger(record.lastTotalFiles)
+    || !Array.isArray(record.items)
+    || !record.items.every((entry) =>
+      Array.isArray(entry)
+      && entry.length === CANONICAL_PLAN_ITEM_FACT_NAMES_V2.length
+      && typeof entry[0] === "string"
+      && typeof entry[1] === "string"
+    )
+  ) {
+    return "shape-mismatch";
+  }
+  return {
+    scope,
+    sourceCommitSeq: Number(record.sourceCommitSeq),
+    lastTotalFiles: Number(record.lastTotalFiles),
+    items: record.items as CanonicalPlanItemFactsV2[],
+  };
+}
+
+function readCanonicalPlanDigestScopeV2(value: unknown): SyncScope | null {
+  if (
+    !Array.isArray(value)
+    || value.length !== 4
+    || !value.every((part) => typeof part === "string")
+  ) {
+    return null;
+  }
+  return {
+    accountId: String(value[0]),
+    driveId: String(value[1]),
+    vaultFolderId: String(value[2]),
+    filesRootId: String(value[3]),
+  };
+}
+
+function diffCanonicalPlanItemFactsV2(input: {
+  previous: CanonicalPlanItemFactsV2[];
+  next: CanonicalPlanItemFactsV2[];
+  previousLastTotalFiles: number;
+  nextLastTotalFiles: number;
+  limit: number;
+}): CanonicalPlanItemFactsDriftV2 {
+  const group = (facts: readonly CanonicalPlanItemFactsV2[]) => {
+    const groups = new Map<string, number[]>();
+    facts.forEach((entry, index) => {
+      const key = `${String(entry[0])}\u0000${String(entry[1])}`;
+      const indexes = groups.get(key);
+      if (indexes) indexes.push(index);
+      else groups.set(key, [index]);
+    });
+    return groups;
+  };
+  const sampleOf = (
+    kind: CanonicalPlanItemFactsDriftSampleV2["kind"],
+    facts: CanonicalPlanItemFactsV2,
+    fields: string[],
+  ): CanonicalPlanItemFactsDriftSampleV2 => ({
+    kind,
+    type: String(facts[0]),
+    path: String(facts[1]),
+    fields,
+  });
+  const previousGroups = group(input.previous);
+  const nextGroups = group(input.next);
+  const samples: CanonicalPlanItemFactsDriftSampleV2[] = [];
+  let changed = 0;
+  let added = 0;
+  let removed = 0;
+  let outsideReviewFields = true;
+  const pushSample = (
+    kind: CanonicalPlanItemFactsDriftSampleV2["kind"],
+    facts: CanonicalPlanItemFactsV2,
+    fields: string[],
+  ): void => {
+    if (samples.length < input.limit) {
+      samples.push(sampleOf(kind, facts, fields));
+    }
+  };
+  for (const [key, previousIndexes] of previousGroups) {
+    const nextIndexes = nextGroups.get(key) ?? [];
+    const paired = Math.min(previousIndexes.length, nextIndexes.length);
+    for (let position = 0; position < paired; position++) {
+      const previousFacts = input.previous[previousIndexes[position]];
+      const nextFacts = input.next[nextIndexes[position]];
+      const fields = canonicalPlanItemFactChangeNamesV2(previousFacts, nextFacts);
+      if (fields.length === 0) continue;
+      changed++;
+      // The flag stays true only while every changed field is one the review
+      // projection cannot show.
+      if (fields.some((field) =>
+        CANONICAL_REVIEW_VISIBLE_FACT_NAMES_V2.has(field))) {
+        outsideReviewFields = false;
+      }
+      pushSample("changed", previousFacts, fields);
+    }
+    for (let position = paired; position < previousIndexes.length; position++) {
+      removed++;
+      // An item appearing or disappearing moves the reviewed (type,path) set,
+      // which the projection shows as a whole.
+      outsideReviewFields = false;
+      pushSample("removed", input.previous[previousIndexes[position]], []);
+    }
+  }
+  for (const [key, nextIndexes] of nextGroups) {
+    const previousIndexes = previousGroups.get(key) ?? [];
+    for (let position = previousIndexes.length; position < nextIndexes.length;
+      position++) {
+      added++;
+      outsideReviewFields = false;
+      pushSample("added", input.next[nextIndexes[position]], []);
+    }
+  }
+  const total = changed + added + removed;
+  return {
+    available: true,
+    reason: null,
+    items: { previous: input.previous.length, next: input.next.length },
+    lastTotalFiles: {
+      previous: input.previousLastTotalFiles,
+      next: input.nextLastTotalFiles,
+    },
+    changed,
+    added,
+    removed,
+    samples,
+    samplesOmitted: Math.max(0, total - samples.length),
+    outsideReviewFields: total > 0 && outsideReviewFields,
+  };
+}
+
+function canonicalPlanItemFactChangeNamesV2(
+  previous: CanonicalPlanItemFactsV2,
+  next: CanonicalPlanItemFactsV2,
+): string[] {
+  const names: string[] = [];
+  CANONICAL_PLAN_ITEM_FACT_NAMES_V2.forEach((name, position) => {
+    const previousValue = previous[position];
+    const nextValue = next[position];
+    if (sameCanonicalPlanItemFactValueV2(previousValue, nextValue)) return;
+    const nested = CANONICAL_PLAN_ITEM_FACT_NESTED_NAMES_V2[position];
+    if (
+      !nested
+      || !Array.isArray(previousValue)
+      || !Array.isArray(nextValue)
+      || previousValue.length !== nested.length
+      || nextValue.length !== nested.length
+    ) {
+      names.push(name);
+      return;
+    }
+    nested.forEach((nestedName, nestedPosition) => {
+      if (!sameCanonicalPlanItemFactValueV2(
+        previousValue[nestedPosition],
+        nextValue[nestedPosition],
+      )) {
+        names.push(nestedName);
+      }
+    });
+  });
+  return names;
+}
+
+function sameCanonicalPlanItemFactValueV2(
+  left: unknown,
+  right: unknown,
+): boolean {
+  // Deep equality over the same JSON shape the digest itself serializes.
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 function sameEnvelopeScope(
   left: SyncStateEnvelopeV2,
   right: SyncStateEnvelopeV2,

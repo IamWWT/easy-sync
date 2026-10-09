@@ -67,13 +67,7 @@ function createMockPlugin(): EasySyncPlugin {
       isPending: false,
       deviceAttempt: null,
     },
-    progressStore: { state: {} },
-    syncExecutor: undefined,
-    state: undefined,
-    startManualSync: vi.fn(),
-    startFirstSync: vi.fn(),
-    executePlanReview: vi.fn(),
-    cancelSync: vi.fn(),
+    openSyncPanelFromSettings: vi.fn().mockResolvedValue(undefined),
     logoutUser: vi.fn().mockResolvedValue(undefined),
     getUpdatePromptState: vi.fn(() => null),
     openUpdatePage: vi.fn(),
@@ -209,31 +203,56 @@ describe("buildAccountSettingDefinitions", () => {
     expect(items[0].name).toBe(i18n.t("settings.account.name"));
   });
 
-  it("hides the sync-action row until the user is signed in", () => {
+  it("hides the sync-panel row until the user is signed in", () => {
     const plugin = createMockPlugin();
     const i18n = new I18n("zh-cn");
     const group = buildAccountSettingDefinitions(i18n.t.bind(i18n), plugin);
     const items = (group as {
       items: Array<{ name?: string; visible?: () => boolean }>;
     }).items;
-    const syncItem = items.find((i) => i.name === i18n.t("settings.firstSync.name"));
+    const syncItem = items.find((i) => i.name === i18n.t("settings.syncPanel.name"));
     expect(syncItem).toBeDefined();
-    // Logged out: the sync action must not render (mirrors renderAccountSection).
+    // Logged out: the entry must not render (mirrors renderAccountSection).
     expect(syncItem?.visible?.()).toBe(false);
   });
 
-  it("shows the sync-action row once the user is signed in", () => {
+  it("opens the sync panel from the signed-in entry row", async () => {
     const plugin = createMockPlugin();
     (plugin.auth as unknown as {
       authState: { isLoggedIn: boolean; displayName?: string };
     }).authState.isLoggedIn = true;
+    const openSyncPanelFromSettings = (plugin as unknown as {
+      openSyncPanelFromSettings: ReturnType<typeof vi.fn>;
+    }).openSyncPanelFromSettings;
     const i18n = new I18n("zh-cn");
     const group = buildAccountSettingDefinitions(i18n.t.bind(i18n), plugin);
     const items = (group as {
-      items: Array<{ name?: string; visible?: () => boolean }>;
+      items: Array<{
+        name?: string;
+        visible?: () => boolean;
+        render?: (s: never) => void;
+      }>;
     }).items;
-    const syncItem = items.find((i) => i.name === i18n.t("settings.firstSync.name"));
+    const syncItem = items.find((i) => i.name === i18n.t("settings.syncPanel.name"));
     expect(syncItem?.visible?.()).toBe(true);
+
+    const setting = new Setting({} as HTMLElement) as never;
+    let clickHandler: (() => void | Promise<void>) | null = null;
+    const btn = new ButtonComponent({} as HTMLElement) as unknown as {
+      buttonEl: unknown;
+      setButtonText: (t: string) => unknown;
+      onClick: (cb: () => void | Promise<void>) => unknown;
+    };
+    btn.buttonEl = { classList: { add: () => undefined } };
+    btn.setButtonText = (() => btn) as never;
+    btn.onClick = ((cb: () => void | Promise<void>) => { clickHandler = cb; return btn; }) as never;
+    vi.spyOn(setting as never, "addButton").mockImplementation(
+      (cb: (b: unknown) => void) => { cb(btn); return setting; },
+    );
+    syncItem!.render!(setting);
+
+    await clickHandler!();
+    expect(openSyncPanelFromSettings).toHaveBeenCalledTimes(1);
   });
 
   it("renders the account row without throwing", () => {

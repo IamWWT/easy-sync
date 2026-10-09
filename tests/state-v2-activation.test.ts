@@ -5087,7 +5087,7 @@ describe("V1 to V2 controlled production activation", () => {
   }, 30_000);
 
   it("reports candidate drift facts when the migration review source drifts between rounds", async () => {
-    const { fixtureInput, equalPaths } =
+    const { fixtureInput, equalPaths, differentPath } =
       await public113ReinstalledMixedVersionFixtureInput({
         baseCount: 1,
         equalCount: 1,
@@ -5133,6 +5133,14 @@ describe("V1 to V2 controlled production activation", () => {
     expect(harness.state.activeV2MigrationHold).not.toBeNull();
 
     await harness.cloudBootstrap.create("testVault", bootstrapB);
+    // The user keeps editing between the review and this confirmation: one
+    // reviewed file changes locally without changing its length.
+    const editedEntry = harness.localEntryState.find((entry) =>
+      entry.path === differentPath)!;
+    editedEntry.hash = await sha256Hex(
+      new TextEncoder().encode("y".repeat(editedEntry.size)),
+    );
+    editedEntry.mtime++;
     const drifted = await harness.executor.run(
       "manual",
       {},
@@ -5163,6 +5171,28 @@ describe("V1 to V2 controlled production activation", () => {
       },
       planIdentityUnchanged: false,
     });
+    // Item-level layer: the warn detail names the changed file and the exact
+    // fact that moved, without ever printing a fact value.
+    const itemFacts = changedWarn![2].itemFacts;
+    expect(itemFacts).toMatchObject({
+      available: true,
+      reason: null,
+      changed: 1,
+      added: 0,
+      removed: 0,
+      samplesOmitted: 0,
+      outsideReviewFields: false,
+      samples: [{
+        kind: "changed",
+        type: SyncActionType.Conflict,
+        path: differentPath,
+        fields: expect.arrayContaining(["local.hash"]),
+      }],
+    });
+    expect(JSON.stringify(itemFacts)).not.toContain(editedEntry.hash);
+    // The re-staged hold reports its own revision next to the round-1 warning.
+    expect(changedWarn![2].holdRevision)
+      .toBe(harness.state.activeV2MigrationHold!.revision);
   }, 30_000);
 
   it("uses a partial bootstrap per path and reads only stale or locally changed content", async () => {

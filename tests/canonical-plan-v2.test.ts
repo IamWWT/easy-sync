@@ -4,6 +4,7 @@ import type { DriveItem } from "../src/onedrive/types";
 import {
   buildCanonicalPlanCandidateV2,
   canonicalPlanDigestV2,
+  describeCanonicalPlanItemFactsDriftV2,
   finalizeCanonicalPlanCandidateV2,
   isAtOrBelowPath,
   isProtectedFolderDeletePath,
@@ -1726,6 +1727,476 @@ describe("canonical V2 plan candidate", () => {
       digest([changedToken]),
       digest([changedReceipt]),
     ]).size).toBe(3);
+  });
+
+  describe("item-fact drift knife (2026-10-09)", () => {
+    const digestOf = (planItems: SyncPlanItem[], lastTotalFiles = 4) =>
+      canonicalPlanDigestV2({
+        items: planItems,
+        lastTotalFiles,
+        scope,
+        sourceCommitSeq: 7,
+      });
+    const drift = (
+      previous: SyncPlanItem[],
+      next: SyncPlanItem[],
+      options: {
+        previousLastTotalFiles?: number;
+        nextLastTotalFiles?: number;
+        limit?: number;
+      } = {},
+    ) => describeCanonicalPlanItemFactsDriftV2({
+      previousDigest: digestOf(previous, options.previousLastTotalFiles ?? 4),
+      nextItems: next,
+      nextDigest: digestOf(next, options.nextLastTotalFiles ?? 4),
+      ...(options.limit === undefined ? {} : { limit: options.limit }),
+    });
+
+    function uploadItem(path: string, hash = hashA): SyncPlanItem {
+      return {
+        type: SyncActionType.Upload,
+        path,
+        local: { path, hash, size: 10, mtime: 1, binary: false },
+      };
+    }
+
+    /** One item carrying every optional fact slot the digest serializes. */
+    function guardItem(): SyncPlanItem {
+      return {
+        type: SyncActionType.Conflict,
+        path: "guard/note.md",
+        reason: "reason.newFileBothSides",
+        local: {
+          path: "guard/note.md",
+          hash: hashB,
+          size: 12,
+          mtime: 1,
+          binary: false,
+        },
+        remote: {
+          path: "guard/note.md",
+          driveId: "guard-drive",
+          parentId: "guard-parent",
+          size: 12,
+          mtime: 1,
+          eTag: "etag-guard",
+          cTag: "ctag-guard",
+          sha256Hash: hashB,
+          quickXorHash: "quick-guard",
+        },
+        folder: {
+          remoteId: "guard-folder",
+          parentRemoteId: "guard-folder-parent",
+          parentPath: "guard",
+          remoteETag: "etag-guard-folder",
+          parentRemoteETag: "etag-guard-folder-parent",
+          sourceParentRemoteId: "guard-source-parent",
+        },
+        baseEtag: "etag-guard-base",
+        renameFrom: "guard/old.md",
+        targetParentRemoteId: "guard-target-parent",
+        requiresConfirmation: false,
+        reviewImpactCount: 3,
+        decisionToken: {
+          version: 1,
+          vaultName: "Vault",
+          accountId: scope.accountId,
+          scope,
+          local: { exists: true, hash: hashB, size: 12 },
+          remote: { exists: true, driveId: "guard-drive", eTag: "etag-guard" },
+          ancestorHash: hashA,
+        },
+        contentComparison: {
+          version: 1,
+          result: "different",
+          localHash: hashB,
+          localSize: 12,
+          remoteDriveId: "guard-drive",
+          remoteETag: "etag-guard",
+          remoteSize: 12,
+          remoteHash: "d".repeat(64),
+        },
+      };
+    }
+
+    it("names the one drifted fact for every item-fact position", () => {
+      const base = guardItem();
+      const mutations: Array<{
+        name: string;
+        mutate: (item: SyncPlanItem) => void;
+      }> = [
+        { name: "type", mutate: (item) => {
+          item.type = SyncActionType.Download;
+        } },
+        { name: "path", mutate: (item) => {
+          item.path = "guard/moved.md";
+        } },
+        { name: "reason", mutate: (item) => {
+          item.reason = "reason.other";
+        } },
+        { name: "local", mutate: (item) => {
+          delete item.local;
+        } },
+        { name: "local.path", mutate: (item) => {
+          item.local!.path = "guard/moved.md";
+        } },
+        { name: "local.hash", mutate: (item) => {
+          item.local!.hash = hashA;
+        } },
+        { name: "local.size", mutate: (item) => {
+          item.local!.size = 99;
+        } },
+        { name: "local.binary", mutate: (item) => {
+          item.local!.binary = true;
+        } },
+        { name: "remote", mutate: (item) => {
+          delete item.remote;
+        } },
+        { name: "remote.path", mutate: (item) => {
+          item.remote!.path = "guard/moved.md";
+        } },
+        { name: "remote.driveId", mutate: (item) => {
+          item.remote!.driveId = "other-drive";
+        } },
+        { name: "remote.parentId", mutate: (item) => {
+          item.remote!.parentId = "other-parent";
+        } },
+        { name: "remote.size", mutate: (item) => {
+          item.remote!.size = 99;
+        } },
+        { name: "remote.eTag", mutate: (item) => {
+          item.remote!.eTag = "etag-other";
+        } },
+        { name: "remote.cTag", mutate: (item) => {
+          item.remote!.cTag = "ctag-other";
+        } },
+        { name: "remote.sha256Hash", mutate: (item) => {
+          item.remote!.sha256Hash = hashA;
+        } },
+        { name: "remote.quickXorHash", mutate: (item) => {
+          item.remote!.quickXorHash = "quick-other";
+        } },
+        { name: "folder", mutate: (item) => {
+          delete item.folder;
+        } },
+        { name: "folder.remoteId", mutate: (item) => {
+          item.folder!.remoteId = "other-folder";
+        } },
+        { name: "folder.parentRemoteId", mutate: (item) => {
+          item.folder!.parentRemoteId = "other-parent";
+        } },
+        { name: "folder.parentPath", mutate: (item) => {
+          item.folder!.parentPath = "other";
+        } },
+        { name: "folder.remoteETag", mutate: (item) => {
+          item.folder!.remoteETag = "etag-other";
+        } },
+        { name: "folder.parentRemoteETag", mutate: (item) => {
+          item.folder!.parentRemoteETag = "etag-other";
+        } },
+        { name: "folder.sourceParentRemoteId", mutate: (item) => {
+          item.folder!.sourceParentRemoteId = "other-source";
+        } },
+        { name: "baseEtag", mutate: (item) => {
+          item.baseEtag = "etag-other";
+        } },
+        { name: "renameFrom", mutate: (item) => {
+          delete item.renameFrom;
+        } },
+        { name: "targetParentRemoteId", mutate: (item) => {
+          delete item.targetParentRemoteId;
+        } },
+        { name: "requiresConfirmation", mutate: (item) => {
+          item.requiresConfirmation = true;
+        } },
+        { name: "reviewImpactCount", mutate: (item) => {
+          item.reviewImpactCount = 4;
+        } },
+        { name: "decisionToken", mutate: (item) => {
+          delete item.decisionToken;
+        } },
+        { name: "decisionToken.version", mutate: (item) => {
+          (item.decisionToken as { version: number }).version = 2;
+        } },
+        { name: "decisionToken.vaultName", mutate: (item) => {
+          item.decisionToken!.vaultName = "Other";
+        } },
+        { name: "decisionToken.accountId", mutate: (item) => {
+          item.decisionToken!.accountId = "other-account";
+        } },
+        { name: "decisionToken.scope.accountId", mutate: (item) => {
+          item.decisionToken!.scope.accountId = "other-account";
+        } },
+        { name: "decisionToken.scope.driveId", mutate: (item) => {
+          item.decisionToken!.scope.driveId = "other-drive";
+        } },
+        { name: "decisionToken.scope.vaultFolderId", mutate: (item) => {
+          item.decisionToken!.scope.vaultFolderId = "other-vault";
+        } },
+        { name: "decisionToken.scope.filesRootId", mutate: (item) => {
+          item.decisionToken!.scope.filesRootId = "other-root";
+        } },
+        { name: "decisionToken.local", mutate: (item) => {
+          (item.decisionToken as { local: unknown }).local = { exists: false };
+        } },
+        { name: "decisionToken.remote", mutate: (item) => {
+          (item.decisionToken as { remote: unknown }).remote = { exists: false };
+        } },
+        { name: "decisionToken.ancestorHash", mutate: (item) => {
+          item.decisionToken!.ancestorHash = null;
+        } },
+        { name: "contentComparison", mutate: (item) => {
+          delete item.contentComparison;
+        } },
+        { name: "contentComparison.version", mutate: (item) => {
+          (item.contentComparison as { version: number }).version = 2;
+        } },
+        { name: "contentComparison.result", mutate: (item) => {
+          (item.contentComparison as { result: string }).result = "equal";
+        } },
+        { name: "contentComparison.localHash", mutate: (item) => {
+          item.contentComparison!.localHash = hashA;
+        } },
+        { name: "contentComparison.localSize", mutate: (item) => {
+          item.contentComparison!.localSize = 99;
+        } },
+        { name: "contentComparison.remoteDriveId", mutate: (item) => {
+          item.contentComparison!.remoteDriveId = "other-drive";
+        } },
+        { name: "contentComparison.remoteETag", mutate: (item) => {
+          item.contentComparison!.remoteETag = "etag-other";
+        } },
+        { name: "contentComparison.remoteSize", mutate: (item) => {
+          item.contentComparison!.remoteSize = 99;
+        } },
+        { name: "contentComparison.remoteHash", mutate: (item) => {
+          item.contentComparison!.remoteHash = "e".repeat(64);
+        } },
+      ];
+      // 13 top-level positions + local 4 / remote 8 / folder 6 / token 10 /
+      // comparison 8 nested positions of canonicalPlanItemFactsV2.
+      expect(mutations).toHaveLength(13 + 4 + 8 + 6 + 10 + 8);
+      for (const { name, mutate } of mutations) {
+        const next = [structuredClone(base)];
+        mutate(next[0]!);
+        const report = drift([base], next);
+        if (name === "type" || name === "path") {
+          // The match key is (type,path): an identity change leaves the paired
+          // group and appears as one removal plus one addition.
+          expect(report, name).toMatchObject({
+            available: true,
+            changed: 0,
+            added: 1,
+            removed: 1,
+            samplesOmitted: 0,
+          });
+          expect(report.samples.map((sample) => sample.kind), name)
+            .toEqual(["removed", "added"]);
+          continue;
+        }
+        expect(report, name).toMatchObject({
+          available: true,
+          changed: 1,
+          added: 0,
+          removed: 0,
+          samplesOmitted: 0,
+        });
+        expect(report.samples, name).toEqual([{
+          kind: "changed",
+          type: base.type,
+          path: base.path,
+          fields: [name],
+        }]);
+      }
+    });
+
+    it("separates added from removed items and keeps them out of changed", () => {
+      const kept = uploadItem("keep.md");
+      const dropped = uploadItem("dropped.md");
+      const fresh = uploadItem("fresh.md");
+      const report = drift([kept, dropped], [kept, fresh]);
+
+      expect(report).toMatchObject({
+        available: true,
+        reason: null,
+        changed: 0,
+        added: 1,
+        removed: 1,
+        samplesOmitted: 0,
+        outsideReviewFields: false,
+      });
+      expect(report.items).toEqual({ previous: 2, next: 2 });
+      expect(report.lastTotalFiles).toEqual({ previous: 4, next: 4 });
+      expect(report.samples).toEqual([
+        {
+          kind: "removed",
+          type: SyncActionType.Upload,
+          path: "dropped.md",
+          fields: [],
+        },
+        {
+          kind: "added",
+          type: SyncActionType.Upload,
+          path: "fresh.md",
+          fields: [],
+        },
+      ]);
+    });
+
+    it("bounds samples at ten by default and reports the omitted rest", () => {
+      const before = Array.from(
+        { length: 12 },
+        (_, index) => uploadItem(`note-${index}.md`),
+      );
+      const after = before.map((item) => ({
+        ...item,
+        local: { ...item.local!, hash: hashB },
+      }));
+
+      const capped = drift(before, after);
+      expect(capped).toMatchObject({ changed: 12, samplesOmitted: 2 });
+      expect(capped.samples).toHaveLength(10);
+      expect(capped.samples[0]?.path).toBe("note-0.md");
+
+      const explicit = drift(before, after, { limit: 3 });
+      expect(explicit).toMatchObject({ changed: 12, samplesOmitted: 9 });
+      expect(explicit.samples).toHaveLength(3);
+      expect(explicit.samples.map((sample) => sample.path))
+        .toEqual(["note-0.md", "note-1.md", "note-2.md"]);
+    });
+
+    it("reports the specific drift that the review projection cannot show", () => {
+      const base = guardItem();
+      const tokenOnly = [structuredClone(base)];
+      tokenOnly[0]!.decisionToken!.ancestorHash = null;
+      expect(drift([base], tokenOnly)).toMatchObject({
+        available: true,
+        changed: 1,
+        outsideReviewFields: true,
+        samples: [{
+          kind: "changed",
+          path: base.path,
+          fields: ["decisionToken.ancestorHash"],
+        }],
+      });
+
+      const receiptOnly = [structuredClone(base)];
+      receiptOnly[0]!.contentComparison!.remoteHash = "e".repeat(64);
+      expect(drift([base], receiptOnly)).toMatchObject({
+        outsideReviewFields: true,
+        samples: [{ fields: ["contentComparison.remoteHash"] }],
+      });
+
+      const visibleOnly = [structuredClone(base)];
+      visibleOnly[0]!.local!.hash = hashA;
+      expect(drift([base], visibleOnly)).toMatchObject({
+        outsideReviewFields: false,
+        samples: [{ fields: ["local.hash"] }],
+      });
+    });
+
+    it("never puts fact values into the report", () => {
+      const base = guardItem();
+      const next = [structuredClone(base)];
+      next[0]!.local!.hash = "f".repeat(64);
+      next[0]!.remote!.cTag = "ctag-leak-probe";
+      const report = drift([base], next);
+
+      expect(report.samples).toEqual([{
+        kind: "changed",
+        type: base.type,
+        path: base.path,
+        fields: ["local.hash", "remote.cTag"],
+      }]);
+      const serialized = JSON.stringify(report);
+      expect(serialized).not.toContain("f".repeat(64));
+      expect(serialized).not.toContain("ctag-leak-probe");
+    });
+
+    it("reports lastTotalFiles drift on its own", () => {
+      const items = [uploadItem("note.md")];
+      const report = describeCanonicalPlanItemFactsDriftV2({
+        previousDigest: digestOf(items, 4),
+        nextItems: items,
+        nextDigest: digestOf(items, 9),
+      });
+
+      expect(report).toMatchObject({
+        available: true,
+        changed: 0,
+        added: 0,
+        removed: 0,
+        samplesOmitted: 0,
+      });
+      expect(report.samples).toEqual([]);
+      expect(report.items).toEqual({ previous: 1, next: 1 });
+      expect(report.lastTotalFiles).toEqual({ previous: 4, next: 9 });
+    });
+
+    it("keeps every failure reason non-throwing on an unreadable digest", () => {
+      const items = [uploadItem("note.md")];
+      const valid = digestOf(items);
+      const next = [uploadItem("note.md")];
+      const nextDigest = digestOf(next);
+      const failure = {
+        available: false,
+        items: null,
+        lastTotalFiles: null,
+        changed: 0,
+        added: 0,
+        removed: 0,
+        samples: [],
+        samplesOmitted: 0,
+        outsideReviewFields: false,
+      };
+
+      expect(describeCanonicalPlanItemFactsDriftV2({
+        previousDigest: "not json",
+        nextItems: next,
+        nextDigest,
+      })).toEqual({ ...failure, reason: "unparsable" });
+      expect(describeCanonicalPlanItemFactsDriftV2({
+        previousDigest: valid,
+        nextItems: next,
+        nextDigest: "{oops",
+      })).toEqual({ ...failure, reason: "unparsable" });
+      for (const malformed of [
+        JSON.stringify([1, 2, 3]),
+        JSON.stringify({ version: 3, items: [] }),
+        JSON.stringify({
+          version: 2,
+          sourceCommitSeq: 7,
+          scope: ["a", "b", "c"],
+          lastTotalFiles: 1,
+          items: [],
+        }),
+        JSON.stringify({
+          version: 2,
+          sourceCommitSeq: 7,
+          scope: ["a", "b", "c", "d"],
+          lastTotalFiles: 1,
+          items: [["upload", "note.md"]],
+        }),
+        JSON.stringify({
+          version: 2,
+          sourceCommitSeq: 7,
+          scope: ["a", "b", "c", "d"],
+          lastTotalFiles: 1.5,
+          items: [],
+        }),
+      ]) {
+        expect(describeCanonicalPlanItemFactsDriftV2({
+          previousDigest: malformed,
+          nextItems: next,
+          nextDigest,
+        })).toEqual({ ...failure, reason: "shape-mismatch" });
+      }
+      expect(describeCanonicalPlanItemFactsDriftV2({
+        previousDigest: valid,
+        nextItems: next,
+        nextDigest: digestOf([uploadItem("other.md")]),
+      })).toEqual({ ...failure, reason: "sealed-plan-not-reproducible" });
+    });
   });
 
   it("keeps folder/identity array surgery out of SyncExecutor", () => {

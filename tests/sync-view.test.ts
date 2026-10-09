@@ -20,6 +20,7 @@ import {
   formatSyncHistoryCounts,
   isBatchedDeleteSet,
   isDecisionRowKey,
+  isPlanReviewRefreshedSinceShown,
   resolveFileProgressPresentation,
   resolvePlanReviewDetailsState,
   resolveRemoteScopeRecoveryFailurePresentation,
@@ -2397,6 +2398,90 @@ describe("buildSyncViewContentKey", () => {
     expect(section).toContain("hasDecisionRows");
     expect(section).toContain("SyncActionType.Conflict");
     expect(section).toContain("SyncActionType.ConfirmLocalDelete");
+  });
+
+  it("marks a re-staged activation review only after the sidebar showed its baseline", () => {
+    // 2026-10-09 用户拍板（F22 候选②）：触发只认「激活类审阅的修订号越过本视图
+    // 首次展示时的基线」——激活家族修订号由 hold 幂等暂存守卫维护，涨号 ⟺
+    // 用户正看着的这份计划被换过。
+    expect(isPlanReviewRefreshedSinceShown({
+      reviewKind: "v2-cloud-join",
+      currentRevision: 8,
+      baselineRevision: 8,
+    })).toBe(false);
+    expect(isPlanReviewRefreshedSinceShown({
+      reviewKind: "v2-cloud-join",
+      currentRevision: 9,
+      baselineRevision: 8,
+    })).toBe(true);
+    // 本视图还没展示过这份审阅（无基线）：不触发。
+    expect(isPlanReviewRefreshedSinceShown({
+      reviewKind: "v2-cloud-join",
+      currentRevision: 9,
+      baselineRevision: null,
+    })).toBe(false);
+    // 普通审阅：修订号每次重写计划都 +1（计划没变也涨），口径不同，恒不触发。
+    expect(isPlanReviewRefreshedSinceShown({
+      reviewKind: undefined,
+      currentRevision: 9,
+      baselineRevision: 8,
+    })).toBe(false);
+    expect(isPlanReviewRefreshedSinceShown({
+      reviewKind: null,
+      currentRevision: 9,
+      baselineRevision: 8,
+    })).toBe(false);
+    // 防御：修订号回落（重置后的新周期）不当作「已更新」。
+    expect(isPlanReviewRefreshedSinceShown({
+      reviewKind: "v2-migration",
+      currentRevision: 7,
+      baselineRevision: 8,
+    })).toBe(false);
+  });
+
+  it("announces the re-staged review through the two existing slots only", () => {
+    // 不新增槽位与文案：顶部状态行与计划区说明行按条件改说既有的「已更新」
+    // 两句（弹框标题／正文逐字复用）。基线在计划正文首次渲染时记下、审阅
+    // 结束时清零。
+    const source = readFileSync("src/ui/sync-view.ts", "utf8");
+    expect(source).toContain(
+      "private planReviewBaselineRevision: number | null = null;",
+    );
+    const planBlockStart = source.indexOf('if (bodyMode === "plan" && syncState) {');
+    const planBlockEnd = source.indexOf("this.renderedBodyMode = bodyMode;", planBlockStart);
+    const planBlock = source.slice(planBlockStart, planBlockEnd);
+    expect(planBlock).toContain(
+      "this.planReviewBaselineRevision = syncState.planReviewRevision;",
+    );
+    expect(planBlock).toContain("} else if (!planReviewActive) {");
+    expect(planBlock).toContain("this.planReviewBaselineRevision = null;");
+    expect(planBlock).toContain(
+      "const planReviewRefreshed = isPlanReviewRefreshedSinceShown({",
+    );
+
+    const statusStart = source.indexOf("private getStatusPresentation(");
+    const statusEnd = source.indexOf("private renderProgressPanel(", statusStart);
+    const status = source.slice(statusStart, statusEnd);
+    expect(status).toContain("state.planReviewRefreshed");
+    expect(status).toContain('"syncPlan.reviewUpdatedTitle"');
+    expect(status).toContain('"syncPlan.sectionTitle"');
+
+    const sectionStart = source.indexOf("private renderPlanReviewSection");
+    const sectionEnd = source.indexOf("private renderPlanGroups", sectionStart);
+    const section = source.slice(sectionStart, sectionEnd);
+    const branchStart = section.indexOf("if (planReviewRefreshed) {");
+    const branchEnd = section.indexOf(
+      '} else if (activationReviewKind === "v2-migration") {',
+    );
+    expect(branchStart).toBeGreaterThan(-1);
+    expect(branchEnd).toBeGreaterThan(branchStart);
+    const refreshedBranch = section.slice(branchStart, branchEnd);
+    // 同一说明槽位、单块：刷新分支只创建一个 description div。
+    expect(refreshedBranch.match(/setting-item-description/g)?.length ?? 0).toBe(1);
+    expect(refreshedBranch).toContain('t("syncPlan.reviewUpdatedMessage")');
+    // 未触发时流程句分支链原样保留（互斥，不新增第二块）。
+    expect(section).toContain('t("syncPlan.migrationSummary")');
+    expect(section).toContain("renderSummaryLine");
   });
 
   it("preserves an opened plan group and scroll position across side-action rerenders", () => {

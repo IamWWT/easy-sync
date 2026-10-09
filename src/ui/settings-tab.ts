@@ -2,7 +2,7 @@
  * EasySync Settings Tab
  *
  * Settings page organized by groups (aligned with Obsidian's native SettingGroup style):
- *   - Account and sync action (no heading, always visible)
+ *   - Account and sync-panel entry (no heading, always visible)
  *   - Scope (范围)
  *   - Automatic (自动)
  *   - Display (显示)
@@ -20,7 +20,6 @@ import {
   type SettingDefinitionItem,
 } from "obsidian";
 import type EasySyncPlugin from "../main";
-import { isAnySyncActivityRunning } from "../sync/sync-progress";
 import {
   handleAuthEntryAction,
   resolveAuthEntryPresentation,
@@ -91,69 +90,6 @@ function renderAboutUpdateAffordance(
       plugin.openUpdatePage();
     });
   });
-}
-
-export interface SettingsSyncButtonStateInput {
-  hasCompletedSync: boolean;
-  isRunning: boolean;
-  canCancel: boolean;
-  planReviewActive: boolean;
-}
-
-export interface SettingsSyncButtonState {
-  labelKey: string;
-  cta: boolean;
-  warning: boolean;
-  disabled: boolean;
-  action: "start-first" | "start-manual" | "confirm-plan" | "cancel-sync" | "processing";
-}
-
-export function buildSettingsSyncButtonState(
-  input: SettingsSyncButtonStateInput,
-): SettingsSyncButtonState {
-  if (input.isRunning && input.canCancel) {
-    return {
-      labelKey: "syncView.cancelSync",
-      cta: false,
-      warning: true,
-      disabled: false,
-      action: "cancel-sync",
-    };
-  }
-  if (input.isRunning) {
-    return {
-      labelKey: "syncView.conflict.processing",
-      cta: false,
-      warning: false,
-      disabled: true,
-      action: "processing",
-    };
-  }
-  if (input.planReviewActive) {
-    return {
-      labelKey: "syncPlan.confirmExecute",
-      cta: true,
-      warning: false,
-      disabled: false,
-      action: "confirm-plan",
-    };
-  }
-  if (input.hasCompletedSync) {
-    return {
-      labelKey: "settings.firstSync.sync",
-      cta: true,
-      warning: false,
-      disabled: false,
-      action: "start-manual",
-    };
-  }
-  return {
-    labelKey: "settings.firstSync.start",
-    cta: true,
-    warning: false,
-    disabled: false,
-    action: "start-first",
-  };
 }
 
 export class EasySyncSettingTab extends PluginSettingTab {
@@ -303,50 +239,19 @@ export class EasySyncSettingTab extends PluginSettingTab {
 
     if (!this.plugin.auth?.authState.isLoggedIn) return;
 
-    const hasCompletedSync = this.plugin.hasCompletedSyncState();
-    const fullSyncRunning = this.plugin.syncExecutor?.isRunning ?? false;
-    const sideActionRunning = this.plugin.syncExecutor?.hasSideActionsInFlight ?? false;
-    const isRunning = isAnySyncActivityRunning(
-      this.plugin.progressStore.state,
-      fullSyncRunning,
-      sideActionRunning,
-    );
-    const buttonState = buildSettingsSyncButtonState({
-      hasCompletedSync,
-      isRunning,
-      canCancel: fullSyncRunning,
-      planReviewActive: this.plugin.state?.planReviewActive ?? false,
-    });
+    // Navigation only: progress, plan review and every run action (sync,
+    // confirm, cancel) live in the sidebar, so the settings page must not
+    // carry a second copy of the sidebar's primary button or its state
+    // machine (2026-10-09 拍板，取代 2026-08-16 的设置页「立即同步」动作行).
     accountGroup.addSetting((setting) => {
       setting
-        .setName(t("settings.firstSync.name"))
+        .setName(t("settings.syncPanel.name"))
         .addButton((btn) => {
-          if (buttonState.cta) {
-            btn.setCta();
-          }
-          if (buttonState.warning) {
-            btn.buttonEl.classList.add("mod-warning");
-          }
           btn
-            .setButtonText(t(buttonState.labelKey))
-            .setDisabled(buttonState.disabled)
+            .setButtonText(t("settings.syncPanel.button"))
+            .setCta()
             .onClick(() => {
-              switch (buttonState.action) {
-                case "start-manual":
-                  void this.plugin.startManualSync?.();
-                  return;
-                case "start-first":
-                  void this.plugin.startFirstSync?.();
-                  return;
-                case "confirm-plan":
-                  void this.plugin.executePlanReview?.();
-                  return;
-                case "cancel-sync":
-                  void this.plugin.cancelSync?.();
-                  return;
-                case "processing":
-                  return;
-              }
+              void this.plugin.openSyncPanelFromSettings();
             });
         });
     });
@@ -670,11 +575,11 @@ export class EasySyncSettingTab extends PluginSettingTab {
 }
 
 /**
- * Build the unheaded account/login group plus the sync-action entry for the
+ * Build the unheaded account/login group plus the sync-panel entry for the
  * declarative setting index. On Obsidian 1.13.0+ the host renders the whole
  * tab from getSettingDefinitions() and never calls display(), so this group
  * must mirror renderAccountSection(): the account row is always visible and
- * the sync-action row only appears after sign-in.
+ * the panel-entry row only appears after sign-in.
  */
 export function buildAccountSettingDefinitions(
   t: I18nFn,
@@ -721,52 +626,17 @@ export function buildAccountSettingDefinitions(
         },
       },
       {
-        name: t("settings.firstSync.name"),
-        // The sync action only exists after sign-in, mirroring
+        name: t("settings.syncPanel.name"),
+        // The panel entry only exists after sign-in, mirroring
         // renderAccountSection's early return for logged-out users.
         visible: () => plugin.auth?.authState.isLoggedIn === true,
         render: (setting) => {
-          const hasCompletedSync = plugin.hasCompletedSyncState();
-          const fullSyncRunning = plugin.syncExecutor?.isRunning ?? false;
-          const sideActionRunning = plugin.syncExecutor?.hasSideActionsInFlight ?? false;
-          const isRunning = isAnySyncActivityRunning(
-            plugin.progressStore.state,
-            fullSyncRunning,
-            sideActionRunning,
-          );
-          const buttonState = buildSettingsSyncButtonState({
-            hasCompletedSync,
-            isRunning,
-            canCancel: fullSyncRunning,
-            planReviewActive: plugin.state?.planReviewActive ?? false,
-          });
           setting.addButton((btn) => {
-            if (buttonState.cta) {
-              btn.setCta();
-            }
-            if (buttonState.warning) {
-              btn.buttonEl.classList.add("mod-warning");
-            }
             btn
-              .setButtonText(t(buttonState.labelKey))
-              .setDisabled(buttonState.disabled)
+              .setButtonText(t("settings.syncPanel.button"))
+              .setCta()
               .onClick(() => {
-                switch (buttonState.action) {
-                  case "start-manual":
-                    void plugin.startManualSync?.();
-                    return;
-                  case "start-first":
-                    void plugin.startFirstSync?.();
-                    return;
-                  case "confirm-plan":
-                    void plugin.executePlanReview?.();
-                    return;
-                  case "cancel-sync":
-                    void plugin.cancelSync?.();
-                    return;
-                  case "processing":
-                    return;
-                }
+                void plugin.openSyncPanelFromSettings();
               });
           });
         },

@@ -2,76 +2,77 @@ import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { ConfigSyncModal, isPluginRowHiddenByCloudCleanup } from "../src/ui/config-sync-modal";
 import { SyncPlanAlertModal } from "../src/ui/confirm-modal";
-import { buildSettingsSyncButtonState, EasySyncSettingTab } from "../src/ui/settings-tab";
+import { ButtonComponent, createMockElement } from "./__mocks__/obsidian";
+import { EasySyncSettingTab } from "../src/ui/settings-tab";
 import en from "../src/i18n/en";
 import zhCN from "../src/i18n/zh-cn";
 import type EasySyncPlugin from "../src/main";
 
-describe("buildSettingsSyncButtonState", () => {
-  it("uses a warning cancel button while a full sync is running", () => {
-    expect(buildSettingsSyncButtonState({
-      hasCompletedSync: true,
-      isRunning: true,
-      canCancel: true,
-      planReviewActive: false,
-    })).toMatchObject({
-      labelKey: "syncView.cancelSync",
-      warning: true,
-      disabled: false,
-      action: "cancel-sync",
-    });
+describe("settings tab", () => {
+  it("opens the sync panel from the imperative account row", async () => {
+    const openSyncPanelFromSettings = vi.fn().mockResolvedValue(undefined);
+    const tab = new EasySyncSettingTab({
+      app: {},
+      auth: {
+        authState: { isLoggedIn: true, displayName: "tester" },
+        isInitializing: false,
+        isPending: false,
+        deviceAttempt: null,
+      },
+      openSyncPanelFromSettings,
+    } as unknown as EasySyncPlugin);
+    (tab as unknown as { accountSectionEl: unknown }).accountSectionEl =
+      createMockElement();
+
+    let clickHandler: (() => void | Promise<void>) | null = null;
+    const onClickSpy = vi
+      .spyOn(ButtonComponent.prototype, "onClick")
+      .mockImplementation(function (
+        this: ButtonComponent,
+        callback: () => void | Promise<void>,
+      ) {
+        clickHandler = callback;
+        return this;
+      });
+    try {
+      (tab as unknown as {
+        renderAccountSection(t: (key: string) => string): void;
+      }).renderAccountSection((key) => key);
+      await clickHandler?.();
+    } finally {
+      onClickSpy.mockRestore();
+    }
+
+    expect(openSyncPanelFromSettings).toHaveBeenCalledTimes(1);
   });
 
-  it("uses a disabled processing state for side actions", () => {
-    expect(buildSettingsSyncButtonState({
-      hasCompletedSync: true,
-      isRunning: true,
-      canCancel: false,
-      planReviewActive: false,
-    })).toMatchObject({
-      labelKey: "syncView.conflict.processing",
-      disabled: true,
-      action: "processing",
-    });
-  });
+  it("keeps the settings page a navigation entry, not a second sync workbench", () => {
+    const source = readFileSync("src/ui/settings-tab.ts", "utf8");
+    const accountSection = source.slice(
+      source.indexOf("  private renderAccountSection("),
+      source.indexOf("  private renderRangeSection("),
+    );
+    const declarativeAccount = source.slice(
+      source.indexOf("export function buildAccountSettingDefinitions("),
+      source.indexOf("export function buildSettingDefinitions("),
+    );
 
-  it("switches to confirm execute while a reviewed plan is waiting", () => {
-    expect(buildSettingsSyncButtonState({
-      hasCompletedSync: true,
-      isRunning: false,
-      canCancel: false,
-      planReviewActive: true,
-    })).toMatchObject({
-      labelKey: "syncPlan.confirmExecute",
-      cta: true,
-      action: "confirm-plan",
-    });
-  });
-
-  it("returns the normal sync CTA when idle after first sync", () => {
-    expect(buildSettingsSyncButtonState({
-      hasCompletedSync: true,
-      isRunning: false,
-      canCancel: false,
-      planReviewActive: false,
-    })).toMatchObject({
-      labelKey: "settings.firstSync.sync",
-      cta: true,
-      action: "start-manual",
-    });
-  });
-
-  it("returns the first-sync CTA before any baseline exists", () => {
-    expect(buildSettingsSyncButtonState({
-      hasCompletedSync: false,
-      isRunning: false,
-      canCancel: false,
-      planReviewActive: false,
-    })).toMatchObject({
-      labelKey: "settings.firstSync.start",
-      cta: true,
-      action: "start-first",
-    });
+    for (const block of [accountSection, declarativeAccount]) {
+      expect(block).toContain('t("settings.syncPanel.name")');
+      expect(block).toContain('.setButtonText(t("settings.syncPanel.button"))');
+      expect(block).toContain("openSyncPanelFromSettings()");
+      // 同步、计划确认与取消都归侧栏工作台；设置页不得再长出第二份动作
+      // （2026-10-09 拍板，取代 2026-08-16 的设置页「立即同步」动作行）。
+      expect(block).not.toContain("startManualSync");
+      expect(block).not.toContain("startFirstSync");
+      expect(block).not.toContain("executePlanReview");
+      expect(block).not.toContain("cancelSync");
+    }
+    expect(source).not.toContain("buildSettingsSyncButtonState");
+    expect(zhCN["settings.syncPanel.name"]).toBe("同步面板");
+    expect(zhCN["settings.syncPanel.button"]).toBe("打开");
+    expect(en["settings.syncPanel.name"]).toBe("Sync panel");
+    expect(en["settings.syncPanel.button"]).toBe("Open");
   });
 
   it("keeps notification pop-ups progressive disclosure on both render paths", () => {
@@ -142,15 +143,15 @@ describe("buildSettingsSyncButtonState", () => {
     );
     expect(accountSection).toContain("new SettingGroup(this.accountSectionEl)");
     expect(accountSection).not.toContain(".setHeading(");
-    expect(accountSection).toContain('.setName(t("settings.firstSync.name"))');
-    expect(accountSection).not.toContain('t("settings.firstSync.desc")');
+    expect(accountSection).toContain('.setName(t("settings.syncPanel.name"))');
+    expect(accountSection).not.toContain('t("settings.syncPanel.desc")');
     expect(rangeSection).toContain(".setHeading(");
     expect(rangeSection).toContain('t("settings.group.scope")');
     expect(rangeSection).toContain('.setName(t("settings.syncScope.name"))');
     expect(rangeSection).toContain('.setName(t("settings.syncExclusion.name"))');
     expect(rangeSection).not.toContain('t("settings.maxFileSize.name")');
     expect(rangeSection).not.toContain(".setLimits(");
-    expect(rangeSection).not.toContain('t("settings.firstSync.name")');
+    expect(rangeSection).not.toContain('t("settings.syncPanel.name")');
     expect(rangeSection).not.toContain('t("settings.automaticHandling.name")');
     expect(rangeSection).not.toContain('t("settings.autoSync.name")');
     expect(rangeSection).not.toContain('t("settings.syncInterval.name")');

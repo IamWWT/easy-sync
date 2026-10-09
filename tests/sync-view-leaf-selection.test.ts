@@ -13,6 +13,7 @@
  * 渲染；重开触发见 `src/main.ts` 的 `primarySyncViewLeaf()` 注释。
  */
 import { describe, expect, it, vi } from "vitest";
+import { Platform } from "obsidian";
 import EasySyncPlugin from "../src/main";
 import { SYNC_VIEW_TYPE } from "../src/ui/sync-view";
 
@@ -84,14 +85,85 @@ describe("activateSyncView leaf handling", () => {
     expect(setViewState).not.toHaveBeenCalled();
   });
 
-  it("creates the single view through the left sidebar when none exists", async () => {
+  it("creates the single view through the left sidebar and reveals it when none exists", async () => {
     const setViewState = vi.fn().mockResolvedValue(undefined);
-    const revealLeaf = vi.fn();
-    const plugin = pluginWith([], { revealLeaf, getLeftLeaf: () => ({ setViewState }) });
+    const revealLeaf = vi.fn().mockResolvedValue(undefined);
+    const created = { setViewState };
+    const plugin = pluginWith([], { revealLeaf, getLeftLeaf: () => created });
 
     await plugin.activateSyncView();
 
     expect(setViewState).toHaveBeenCalledWith({ type: SYNC_VIEW_TYPE, active: true });
+    // 2026-10-09 宿主实测：侧栏折叠时 setViewState 只创建视图、面板不可见（点设置页
+    // 「同步面板／打开」看起来毫无反应），创建后必须补 revealLeaf——官方语义即
+    // 「叶在侧栏中时侧栏会被展开」（见 main.ts 同处注释）。
+    expect(revealLeaf).toHaveBeenCalledWith(created);
+    expect(revealLeaf.mock.invocationCallOrder[0]).toBeGreaterThan(
+      setViewState.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("stays a no-op when the host exposes no left leaf", async () => {
+    const revealLeaf = vi.fn().mockResolvedValue(undefined);
+    const plugin = pluginWith([], { revealLeaf, getLeftLeaf: () => null });
+
+    await expect(plugin.activateSyncView()).resolves.toBeUndefined();
+
     expect(revealLeaf).not.toHaveBeenCalled();
+  });
+});
+
+describe("openSyncPanelFromSettings", () => {
+  function pluginWithSettings(
+    close: () => void,
+    order: string[] = [],
+  ): EasySyncPlugin {
+    const plugin = new EasySyncPlugin();
+    const leaf = { view: { containerEl: { isShown: () => true } } };
+    (plugin as never as { app: unknown }).app = {
+      workspace: {
+        getLeavesOfType: () => [leaf],
+        revealLeaf: vi.fn(async () => {
+          order.push("reveal");
+        }),
+      },
+      setting: {
+        close: () => {
+          order.push("close");
+          close();
+        },
+      },
+    };
+    return plugin;
+  }
+
+  it("dismisses the settings surface on mobile so the revealed panel is visible", async () => {
+    const close = vi.fn();
+    const order: string[] = [];
+    const plugin = pluginWithSettings(close, order);
+    Platform.isMobile = true;
+    try {
+      await plugin.openSyncPanelFromSettings();
+    } finally {
+      Platform.isMobile = false;
+    }
+
+    // 移动端设置面是全屏模态：只展开侧栏、不退设置面时，用户看到的还是设置页
+    // （2026-10-09 真机反馈「以为点了没反应」）。顺序＝先展开后退出，避免先退
+    // 出时闪一帧空工作区。
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["reveal", "close"]);
+  });
+
+  it("keeps the settings surface open on desktop", async () => {
+    const close = vi.fn();
+    const order: string[] = [];
+    const plugin = pluginWithSettings(close, order);
+
+    await plugin.openSyncPanelFromSettings();
+
+    // 桌面设置面在独立窗口，不挡侧栏；关掉它只会打断还在改设置的人。
+    expect(close).not.toHaveBeenCalled();
+    expect(order).toEqual(["reveal"]);
   });
 });

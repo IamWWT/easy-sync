@@ -1493,11 +1493,32 @@ export default class EasySyncPlugin extends Plugin {
       this.refreshSyncNoticeVisibility();
       return;
     }
-    await this.app.workspace.getLeftLeaf(false)?.setViewState({
+    const leaf = this.app.workspace.getLeftLeaf(false);
+    if (!leaf) return;
+    await leaf.setViewState({
       type: SYNC_VIEW_TYPE,
       active: true,
     });
+    // setViewState only creates the view: with the sidebar collapsed the panel
+    // stayed hidden, so a first entry (no leaf yet) looked like a no-op
+    // (2026-10-09 宿主实测). revealLeaf is the host's documented way to bring
+    // a sidebar leaf forward — "If the leaf is in a sidebar, the sidebar will
+    // be uncollapsed" (obsidian.d.ts, @since 1.7.2).
+    await this.app.workspace.revealLeaf(leaf);
     this.refreshSyncNoticeVisibility();
+  }
+
+  /**
+   * Settings-page entry to the sync panel. On mobile the settings surface is a
+   * full-screen modal, so revealing the panel alone left the user staring at
+   * the settings screen — the click read as a no-op (2026-10-09 真机反馈).
+   * Reveal first (the drawer opens behind), then dismiss the settings surface
+   * so the panel is what the user lands on. Desktop keeps settings open: there
+   * the settings surface is its own window and never covers the sidebar.
+   */
+  async openSyncPanelFromSettings(): Promise<void> {
+    await this.activateSyncView();
+    if (Platform.isMobile) this.closePluginSettings();
   }
 
   private async runSideActionIntent(
@@ -9858,6 +9879,14 @@ export default class EasySyncPlugin extends Plugin {
     }).setting;
     setting?.open();
     setting?.openTabById(this.manifest.id);
+  }
+
+  /** Counterpart of openPluginSettings: leave the settings surface. */
+  closePluginSettings(): void {
+    const setting = (this.app as unknown as {
+      setting?: { close?: () => void };
+    }).setting;
+    setting?.close?.();
   }
 
   private showRibbonSuccess(): void {

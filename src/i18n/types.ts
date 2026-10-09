@@ -88,9 +88,8 @@ export interface LocaleStrings {
   "settings.account.device.regenerate": string;
   "settings.account.device.cancel": string;
   "settings.account.device.busy": string;
-  "settings.firstSync.name": string;
-  "settings.firstSync.start": string;
-  "settings.firstSync.sync": string;
+  "settings.syncPanel.name": string;
+  "settings.syncPanel.button": string;
   "settings.autoSync.name": string;
   "settings.autoSync.open": string;
   "settings.autoSync.title": string;

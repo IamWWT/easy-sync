@@ -85,6 +85,7 @@ interface StatusPanelState {
   planReviewActive: boolean;
   planReviewRevision: number;
   planReviewDetailsState: "ready" | "recovering" | "retry";
+  planReviewRefreshed: boolean;
   autoSyncPaused: boolean;
   mutationRecovery: MutationRecoveryDisplayState | null;
   latestHistory?: SyncHistoryEntry;
@@ -606,6 +607,25 @@ export function resolvePlanReviewDetailsState(
   return recoveryInFlight ? "recovering" : "retry";
 }
 
+/**
+ * 计划在侧栏展示期间被重新生成过（本会话）。
+ *
+ * 只对激活类审阅（`reviewKind` 存在）成立：该家族的审阅修订号由 hold 的
+ * 幂等暂存守卫维护——计划事实全同则原样返回、不涨号——所以「修订号前进」
+ * 就等于「用户正看着的这份计划被换过」，与确认被拒是同一个不变量。普通审阅
+ * 的修订号每次重写计划都会 +1（计划没变也涨），口径不同，且其「同步计划已
+ * 更新」弹框本就正常出现，不在此列。首次展示（无基线）恒 false。
+ */
+export function isPlanReviewRefreshedSinceShown(input: {
+  reviewKind: string | null | undefined;
+  currentRevision: number;
+  baselineRevision: number | null;
+}): boolean {
+  return input.reviewKind != null
+    && input.baselineRevision !== null
+    && input.currentRevision > input.baselineRevision;
+}
+
 export const SYNC_PLAN_VIRTUAL_OVERSCAN = 6;
 
 /**
@@ -1122,6 +1142,10 @@ export class EasySyncSyncView extends ItemView {
   private renderedBodyMode: SyncViewBodyMode = "idle";
   private renderedPlanReviewRevision = -1;
   private autoRebuiltPlanReviewRevision = -1;
+  // 会话级基线：本视图首次展示当前审阅时的修订号（计划正文首次渲染时记下，
+  // 审阅结束清零）。它只喂 isPlanReviewRefreshedSinceShown——被重新暂存后
+  // 顶部状态行与计划区说明行改说既有的「同步计划已更新」文案。
+  private planReviewBaselineRevision: number | null = null;
   private planReviewDetailsRecoveryInFlight = false;
   // P0: incremental render — frame merging + diffed file list
   private renderFrameId: AnimationFrameHandle | null = null;
@@ -1338,6 +1362,7 @@ export class EasySyncSyncView extends ItemView {
     syncState: EasySyncPlugin["state"];
     planReviewCounts: NonNullable<EasySyncPlugin["state"]>["planReviewCounts"];
     planReviewItems: PlanReviewItem[];
+    planReviewRefreshed: boolean;
     conflicts: SyncPlanItem[];
     pendingDeletes: SyncPlanItem[];
     pendingIssueGroups: PendingIssueReviewGroup[];
@@ -1357,6 +1382,7 @@ export class EasySyncSyncView extends ItemView {
       syncState,
       planReviewCounts,
       planReviewItems,
+      planReviewRefreshed,
       conflicts,
       pendingDeletes,
       pendingIssueGroups,
@@ -1414,6 +1440,7 @@ export class EasySyncSyncView extends ItemView {
         planReviewItems,
         conflicts,
         pendingDeletes,
+        planReviewRefreshed,
       );
     } else if (bodyMode === "progress") {
       this.renderProgressPanel(content, progress);
@@ -1517,6 +1544,10 @@ export class EasySyncSyncView extends ItemView {
       ? container.scrollTop
       : null;
     if (bodyMode === "plan" && syncState) {
+      if (this.planReviewBaselineRevision === null) {
+        // 本视图第一次展示这份审阅：记下基线。之后修订号前进＝这份计划被换过。
+        this.planReviewBaselineRevision = syncState.planReviewRevision;
+      }
       if (this.renderedPlanReviewRevision !== syncState.planReviewRevision) {
         // 会话级覆盖有意不在这里重置：用户点过「全部展开／折叠」之后，新计划
         // 里新出现的条目服从该覆盖（否则每轮新计划都把用户的明确选择抹掉）。
@@ -1531,7 +1562,15 @@ export class EasySyncSyncView extends ItemView {
         preservedHostScrollTop = null;
         this.renderedPlanReviewRevision = syncState.planReviewRevision;
       }
+    } else if (!planReviewActive) {
+      // 审阅结束（确认成功/清空/重置）：基线清零，下一份审阅从流程句重新开始。
+      this.planReviewBaselineRevision = null;
     }
+    const planReviewRefreshed = isPlanReviewRefreshedSinceShown({
+      reviewKind: this.plugin.state?.planReviewAuthorization?.reviewKind,
+      currentRevision: syncState?.planReviewRevision ?? 0,
+      baselineRevision: this.planReviewBaselineRevision,
+    });
     this.renderedBodyMode = bodyMode;
     const planReviewCounts = syncState?.planReviewCounts ?? null;
     const planReviewItems = bodyMode === "plan"
@@ -1565,6 +1604,7 @@ export class EasySyncSyncView extends ItemView {
       planReviewActive,
       planReviewRevision: syncState?.planReviewRevision ?? 0,
       planReviewDetailsState,
+      planReviewRefreshed,
       autoSyncPaused: this.plugin.autoSyncPaused,
       mutationRecovery,
       latestHistory: syncState?.syncHistory[0],
@@ -1604,6 +1644,7 @@ export class EasySyncSyncView extends ItemView {
         syncState,
         planReviewCounts,
         planReviewItems,
+        planReviewRefreshed,
         conflicts,
         pendingDeletes,
         pendingIssueGroups,
@@ -2355,6 +2396,7 @@ export class EasySyncSyncView extends ItemView {
     lastSyncTime: number;
     pendingCount: number;
     planReviewActive: boolean;
+    planReviewRefreshed: boolean;
     autoSyncPaused: boolean;
     mutationRecovery: MutationRecoveryDisplayState | null;
     latestHistory?: SyncHistoryEntry;
@@ -2420,7 +2462,14 @@ export class EasySyncSyncView extends ItemView {
           return { status, label: t("syncView.issues.title", { count: state.pendingCount }) };
         }
         if (state.planReviewActive) {
-          return { status, label: t("syncPlan.sectionTitle") };
+          // 计划在展示期间被重新生成过：同一槽位改说既有的「已更新」句
+          // （弹框标题逐字复用，不新增文案）。
+          return {
+            status,
+            label: t(state.planReviewRefreshed
+              ? "syncPlan.reviewUpdatedTitle"
+              : "syncPlan.sectionTitle"),
+          };
         }
         if (state.mutationRecovery) {
           return {
@@ -3577,6 +3626,7 @@ export class EasySyncSyncView extends ItemView {
     items: PlanReviewItem[],
     conflicts: SyncPlanItem[],
     pendingDeletes: SyncPlanItem[],
+    planReviewRefreshed: boolean,
   ): void {
     const t = this.plugin.i18n.t.bind(this.plugin.i18n);
     const panel = this.createSection(container, t("syncPlan.sectionTitle"));
@@ -3599,7 +3649,13 @@ export class EasySyncSyncView extends ItemView {
       );
     };
 
-    if (activationReviewKind === "v2-migration") {
+    if (planReviewRefreshed) {
+      // 计划在展示期间被重新生成：同一个说明槽位改说既有的「已更新」句
+      // （弹框正文逐字复用，不新增文案）。与下方流程句分支互斥，仍是单块。
+      panel.createDiv("setting-item-description").setText(
+        t("syncPlan.reviewUpdatedMessage"),
+      );
+    } else if (activationReviewKind === "v2-migration") {
       renderSummaryLine(t("syncPlan.migrationSummary"));
     } else if (activationReviewKind === "v2-cloud-join") {
       renderSummaryLine(t("syncPlan.cloudJoinSummary"));
